@@ -54,3 +54,91 @@ def test_invalid_transition_is_409(client):
     r = client.post(f"/v1/parcels/{p['id']}/events", json={"type": "deliver"})
     assert r.status_code == 409
     assert r.json()["status"] == 409
+
+def test_list_parcels_paginates_in_creation_order(client):
+    first = new_parcel(client, ref="ORD-1")
+    second = new_parcel(client, ref="ORD-2")
+    third = new_parcel(client, ref="ORD-3")
+
+    page1 = client.get("/v1/parcels?limit=2")
+    assert page1.status_code == 200
+    body1 = page1.json()
+
+    assert [item["id"] for item in body1["items"]] == [
+        first["id"],
+        second["id"],
+    ]
+    assert body1["next_cursor"] is not None
+
+    page2 = client.get(
+        "/v1/parcels",
+        params={"limit": 2, "cursor": body1["next_cursor"]},
+    )
+    assert page2.status_code == 200
+    body2 = page2.json()
+
+    assert [item["id"] for item in body2["items"]] == [third["id"]]
+    assert body2["next_cursor"] is None
+
+
+def test_list_parcels_rejects_unknown_cursor(client):
+    response = client.get(
+        "/v1/parcels",
+        params={"cursor": "this-is-not-a-valid-cursor"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith(
+        "application/problem+json"
+    )
+
+
+def test_list_parcels_rejects_invalid_limit(client):
+    response = client.get("/v1/parcels?limit=101")
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith(
+        "application/problem+json"
+    )
+
+def test_filtered_pagination_survives_state_change(client):
+    first = new_parcel(client, ref="ORD-1")
+    second = new_parcel(client, ref="ORD-2")
+    third = new_parcel(client, ref="ORD-3")
+
+    # Get the first page of parcels in the created state.
+    page1 = client.get(
+        "/v1/parcels",
+        params={"state": "created", "limit": 2},
+    )
+    assert page1.status_code == 200
+    body1 = page1.json()
+
+    assert [item["id"] for item in body1["items"]] == [
+        first["id"],
+        second["id"],
+    ]
+    cursor = body1["next_cursor"]
+    assert cursor is not None
+
+    # Change the state of the last parcel on page 1.
+    event_response = client.post(
+        f"/v1/parcels/{second['id']}/events",
+        json={"type": "dispatch"},
+    )
+    assert event_response.status_code == 200
+
+    # Continue listing created parcels.
+    page2 = client.get(
+        "/v1/parcels",
+        params={
+            "state": "created",
+            "limit": 2,
+            "cursor": cursor,
+        },
+    )
+    assert page2.status_code == 200
+    body2 = page2.json()
+
+    assert [item["id"] for item in body2["items"]] == [third["id"]]
+    assert body2["next_cursor"] is None
